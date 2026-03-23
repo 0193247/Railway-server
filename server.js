@@ -10,32 +10,50 @@ const pool = new Pool({
 });
 
 const app = express();
+app.set("trust proxy", true);
 app.use(express.json());
 
-// optional: health check
+function clientIp(req) {
+  const xff = req.headers["x-forwarded-for"];
+  if (typeof xff === "string" && xff.length > 0) {
+    return xff.split(",")[0].trim();
+  }
+  const ra = req.socket?.remoteAddress;
+  return ra && ra.length > 0 ? ra : "unknown";
+}
+
+async function ensureRegisterIpTable() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS "RegisterIp" (
+      "ip" text PRIMARY KEY,
+      "userId" integer NOT NULL
+    );
+  `);
+}
+
 app.get("/", (req, res) => {
   res.json({ ok: true, service: "Guidance Auth API" });
 });
 
-// optional: list users
 app.get("/User", async (req, res) => {
   try {
-    const result = await pool.query('SELECT "id", "Name", "Interest" FROM "User" ORDER BY "id"');
+    const result = await pool.query(
+      'SELECT "id", "Name", "Interest" FROM "User" ORDER BY "id"'
+    );
     res.json(result.rows);
   } catch (err) {
-    res.status(500).json({ success: false, message: err.toString() });
+    res.status(500).json({ success: false, message: String(err) });
   }
 });
 
-// Login: verify id + Name
 app.post("/api/auth/login", async (req, res) => {
   try {
     const { id, name } = req.body ?? {};
 
-    if (!Number.isInteger(id) || !name || typeof name !== "string") {
+    if (!Number.isInteger(id) || typeof name !== "string" || !name.trim()) {
       return res.status(400).json({
         success: false,
-        message: "id(integer) and name(string) are required"
+        message: "id (integer) and name (string) are required"
       });
     }
 
@@ -60,39 +78,64 @@ app.post("/api/auth/login", async (req, res) => {
       }
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.toString() });
+    return res.status(500).json({ success: false, message: String(err) });
   }
 });
 
-// Register: create user with Name, id uses serial/identity auto increment
 app.post("/api/auth/register", async (req, res) => {
+  const ip = clientIp(req);
   try {
-    const { name } = req.body ?? {};
+    await ensureRegisterIpTable();
 
-    if (!name || typeof name !== "string" || !name.trim()) {
+    const { name } = req.body ?? {};
+    if (typeof name !== "string" || !name.trim()) {
       return res.status(400).json({
         success: false,
         message: "name is required"
       });
     }
 
-    const result = await pool.query(
+    const dup = await pool.query(
+      'SELECT "userId" FROM "RegisterIp" WHERE "ip" = $1 LIMIT 1',
+      [ip]
+    );
+    if (dup.rowCount > 0) {
+      return res.status(409).json({
+        success: false,
+        message: "This network has already registered an account"
+      });
+    }
+
+    const insertUser = await pool.query(
       'INSERT INTO "User" ("Name") VALUES ($1) RETURNING "id", "Name"',
       [name.trim()]
+    );
+
+    const row = insertUser.rows[0];
+    await pool.query(
+      'INSERT INTO "RegisterIp" ("ip", "userId") VALUES ($1, $2)',
+      [ip, row.id]
     );
 
     return res.status(201).json({
       success: true,
       message: "Register success",
       user: {
-        id: result.rows[0].id,
-        name: result.rows[0].Name
+        id: row.id,
+        name: row.Name
       }
     });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.toString() });
+    return res.status(500).json({ success: false, message: String(err) });
   }
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, async () => {
+  try {
+    await ensureRegisterIpTable();
+  } catch (e) {
+    console.error("ensureRegisterIpTable failed:", e);
+  }
+  console.log(`Server running on port ${PORT}`);
+});
