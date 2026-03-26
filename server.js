@@ -1,125 +1,43 @@
-/**
- * Guidance API: auth + User.interest (text, segments joined by & e.g. music&video+game&sleep).
- * Table "User": id serial, name text, interest text (nullable).
- * Merge into Railway Node or replace server.js after backup.
- */
-import dotenv from "dotenv";
-dotenv.config();
+// Guidance API（极简版）：登录/注册 + User.interest。
+//
+// 目标：只做“能用”的最小功能，不做复杂功能（不做建表/迁移/同 IP 限制/环境探测等）。
+//
+// 数据表约定（Postgres）：
+// - 表名："User"
+// - 字段：
+//   - id: serial (主键)
+//   - name: text
+//   - interest: text (可空，兴趣 joined string，例如 "music&sleep")
+//
+// 运行要求：
+// - 环境变量：DATABASE_URL（Postgres 连接串）
+// - 依赖：express、pg、dotenv（dotenv 可选）
 
-import express from "express";
-import pkg from "pg";
-const { Pool } = pkg;
+require("dotenv").config();
 
-function isLocalhostDatabaseUrl(url) {
-  if (!url || typeof url !== "string") return true;
-  const u = url.toLowerCase();
-  return (
-    u.includes("127.0.0.1") ||
-    u.includes("@localhost") ||
-    u.includes("://localhost") ||
-    u.includes("::1")
-  );
+const express = require("express");
+const { Pool } = require("pg");
+
+// Postgres 连接串（必须提供，否则直接退出，避免服务假启动）。
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL || !String(DATABASE_URL).trim()) {
+  console.error("FATAL: DATABASE_URL is empty.");
+  process.exit(1);
 }
 
-function assertDatabaseUrl() {
-  const url = process.env.DATABASE_URL;
-  const onRailway = Boolean(
-    process.env.RAILWAY_ENVIRONMENT ||
-      process.env.RAILWAY_PROJECT_ID ||
-      process.env.RAILWAY_SERVICE_NAME
-  );
-
-  if (!url || !String(url).trim()) {
-    const msg =
-      "DATABASE_URL is empty. Link Postgres DATABASE_URL to this Web service on Railway.";
-    if (onRailway) {
-      console.error("FATAL:", msg);
-      process.exit(1);
-    }
-    console.warn("WARN:", msg);
-    return;
-  }
-
-  if (onRailway && isLocalhostDatabaseUrl(url)) {
-    console.error(
-      "FATAL: DATABASE_URL points to localhost; use Postgres plugin reference."
-    );
-    process.exit(1);
-  }
-}
-
-assertDatabaseUrl();
-
-function buildPoolConfig() {
-  const connectionString = process.env.DATABASE_URL;
-  const sslDisabled =
-    process.env.PGSSLMODE === "disable" || process.env.DATABASE_SSL === "0";
-
-  let ssl = undefined;
-  if (connectionString && !sslDisabled) {
-    const looksRemote =
-      /amazonaws\.com|azure\.com|neon\.tech|supabase\.co|render\.com|railway\.app|rlwy\.net/i.test(
-        connectionString
-      );
-    if (looksRemote || process.env.RAILWAY_ENVIRONMENT) {
-      ssl = { rejectUnauthorized: false };
-    }
-  }
-
-  return { connectionString, ssl, max: 10, connectionTimeoutMillis: 20000 };
-}
-
-const pool = new Pool(buildPoolConfig());
-
-pool.on("error", (err) => {
-  console.error("Unexpected PG pool error:", err);
-});
-
+// 数据库连接池：这里不做 SSL/railway 的自动推断，保持直线逻辑。
+const pool = new Pool({ connectionString: DATABASE_URL });
 const app = express();
-app.set("trust proxy", true);
 app.use(express.json());
 
-function clientIp(req) {
-  const xff = req.headers["x-forwarded-for"];
-  if (typeof xff === "string" && xff.length > 0) {
-    return xff.split(",")[0].trim();
-  }
-  const ra = req.socket?.remoteAddress;
-  return ra && ra.length > 0 ? ra : "unknown";
-}
-
-async function ensureRegisterIpTable() {
-  await pool.query(`
-    CREATE TABLE IF NOT EXISTS "RegisterIp" (
-      "ip" text PRIMARY KEY,
-      "userId" integer NOT NULL
-    );
-  `);
-}
-
-/** interest column on "User" (lowercase name / interest — no quoted mixed case). */
-async function ensureUserInterestColumn() {
-  await pool.query(`
-    ALTER TABLE "User" ADD COLUMN IF NOT EXISTS interest text;
-  `);
-}
-
+// 健康检查：用于快速确认服务是否在跑。
 app.get("/", (req, res) => {
   res.json({ ok: true, service: "Guidance Auth API" });
 });
 
-app.get("/User", async (req, res) => {
-  try {
-    const result = await pool.query(
-      'SELECT id, name, interest FROM "User" ORDER BY id'
-    );
-    res.json(result.rows);
-  } catch (err) {
-    res.status(500).json({ success: false, message: String(err) });
-  }
-});
-
-/** Single user profile (for YearningWindow). */
+// 获取用户资料（Yearning 页面用）。
+// - path: GET /api/users/:id
+// - return: { id, name, interest }
 app.get("/api/users/:id", async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
@@ -144,9 +62,10 @@ app.get("/api/users/:id", async (req, res) => {
   }
 });
 
-/**
- * Update interest string. Requires body.name to match DB (same as login identity).
- */
+// 更新用户兴趣（interest 字符串）。
+// - path: PATCH /api/users/:id/interest
+// - body: { name: string, interest: string }
+// - 规则：为了避免随便改别人数据，这里要求 body.name 必须和数据库中的 name 一致。
 app.patch("/api/users/:id/interest", async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
@@ -183,6 +102,10 @@ app.patch("/api/users/:id/interest", async (req, res) => {
   }
 });
 
+// 登录：用 (id + name) 做最简身份验证。
+// - path: POST /api/auth/login
+// - body: { id: number|string, name: string }
+// - return: { success, message, user? }
 app.post("/api/auth/login", async (req, res) => {
   try {
     let { id, name } = req.body ?? {};
@@ -221,27 +144,17 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
+// 注册：只提交 name，服务端插入一条 User，并返回分配到的 id。
+// - path: POST /api/auth/register
+// - body: { name: string }
+// - return: { success, message, user }
 app.post("/api/auth/register", async (req, res) => {
-  const ip = clientIp(req);
   try {
-    await ensureRegisterIpTable();
-
     const { name } = req.body ?? {};
     if (typeof name !== "string" || !name.trim()) {
       return res.status(400).json({
         success: false,
         message: "name is required"
-      });
-    }
-
-    const dup = await pool.query(
-      'SELECT "userId" FROM "RegisterIp" WHERE "ip" = $1 LIMIT 1',
-      [ip]
-    );
-    if (dup.rowCount > 0) {
-      return res.status(409).json({
-        success: false,
-        message: "This network has already registered an account"
       });
     }
 
@@ -251,10 +164,6 @@ app.post("/api/auth/register", async (req, res) => {
     );
 
     const row = insertUser.rows[0];
-    await pool.query(
-      'INSERT INTO "RegisterIp" ("ip", "userId") VALUES ($1, $2)',
-      [ip, row.id]
-    );
 
     return res.status(201).json({
       success: true,
@@ -270,27 +179,9 @@ app.post("/api/auth/register", async (req, res) => {
   }
 });
 
-function logErr(prefix, err) {
-  if (err && err.name === "AggregateError" && Array.isArray(err.errors)) {
-    console.error(prefix, err.message);
-    err.errors.forEach((e, i) => console.error(`  [${i}]`, e));
-    return;
-  }
-  console.error(prefix, err);
-}
-
+// 监听端口：Railway 通常会注入 PORT，本地默认 3000。
 const PORT = process.env.PORT || 3000;
 
-async function boot() {
-  try {
-    await ensureRegisterIpTable();
-    await ensureUserInterestColumn();
-  } catch (e) {
-    logErr("DB init failed:", e);
-  }
-  app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on port ${PORT}`);
-  });
-}
-
-boot();
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Server running on port ${PORT}`);
+});
