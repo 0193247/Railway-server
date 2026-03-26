@@ -1,57 +1,51 @@
-// Guidance API（极简版）：登录/注册 + User.interest。
-//
-// 目标：只做“能用”的最小功能，不做复杂功能（不做建表/迁移/同 IP 限制/环境探测等）。
-//
-// 数据表约定（Postgres）：
-// - 表名："User"
-// - 字段：
-//   - id: serial (主键)
-//   - name: text
-//   - interest: text (可空，兴趣 joined string，例如 "music&sleep")
-//
-// 运行要求：
-// - 环境变量：DATABASE_URL（Postgres 连接串）
-// - 依赖：express、pg、dotenv（dotenv 可选）
-
-require("dotenv").config();
+/* 
+  In Postgres:
+    - "User"
+      - id: serial
+      - name: text
+      - interest: text
+  In Node.js:
+    - require DATABASE_URL
+    - require express, pg
+*/
 
 const express = require("express");
 const { Pool } = require("pg");
 
-// Postgres 连接串（必须提供，否则直接退出，避免服务假启动）。
+// Postgres 连接串
 const DATABASE_URL = process.env.DATABASE_URL;
+
+// 判定数据库连接串是否为空
 if (!DATABASE_URL || !String(DATABASE_URL).trim()) {
   console.error("FATAL: DATABASE_URL is empty.");
   process.exit(1);
 }
 
-// 数据库连接池：这里不做 SSL/railway 的自动推断，保持直线逻辑。
+// 数据库连接池
 const pool = new Pool({ connectionString: DATABASE_URL });
 const app = express();
+// 自动解析 body 为 json
 app.use(express.json());
 
-// 健康检查：用于快速确认服务是否在跑。
-app.get("/", (req, res) => {
-  res.json({ ok: true, service: "Guidance Auth API" });
-});
-
-// 获取用户资料（Yearning 页面用）。
-// - path: GET /api/users/:id
-// - return: { id, name, interest }
+// 获取用户资料
 app.get("/api/users/:id", async (req, res) => {
   try {
-    const id = parseInt(req.params.id, 10);
+    const id = parseInt(req.params.id, 10);       // 以十进制解析
     if (!Number.isInteger(id)) {
       return res.status(400).json({ success: false, message: "invalid id" });
     }
+    // 查询
     const result = await pool.query(
       'SELECT id, name, COALESCE(interest, \'\') AS interest FROM "User" WHERE id = $1 LIMIT 1',
       [id]
     );
+    // 查询结果为空
     if (result.rowCount === 0) {
       return res.status(404).json({ success: false, message: "user not found" });
     }
+    // 查询结果为第一行
     const row = result.rows[0];
+    // 返回查询结果
     return res.json({
       id: row.id,
       name: row.name,
@@ -62,10 +56,7 @@ app.get("/api/users/:id", async (req, res) => {
   }
 });
 
-// 更新用户兴趣（interest 字符串）。
-// - path: PATCH /api/users/:id/interest
-// - body: { name: string, interest: string }
-// - 规则：为了避免随便改别人数据，这里要求 body.name 必须和数据库中的 name 一致。
+// 更新 interest
 app.patch("/api/users/:id/interest", async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);
@@ -102,10 +93,7 @@ app.patch("/api/users/:id/interest", async (req, res) => {
   }
 });
 
-// 登录：用 (id + name) 做最简身份验证。
-// - path: POST /api/auth/login
-// - body: { id: number|string, name: string }
-// - return: { success, message, user? }
+// 登录
 app.post("/api/auth/login", async (req, res) => {
   try {
     let { id, name } = req.body ?? {};
@@ -144,10 +132,7 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
-// 注册：只提交 name，服务端插入一条 User，并返回分配到的 id。
-// - path: POST /api/auth/register
-// - body: { name: string }
-// - return: { success, message, user }
+// 注册
 app.post("/api/auth/register", async (req, res) => {
   try {
     const { name } = req.body ?? {};
