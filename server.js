@@ -9,8 +9,8 @@
     - require express, pg
 */
 
-const express = require("express");
-const { Pool } = require("pg");
+import express from "express";
+import {Pool} from "pg";
 
 // Postgres 连接串
 const DATABASE_URL = process.env.DATABASE_URL;
