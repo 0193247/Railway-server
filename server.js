@@ -24,6 +24,7 @@ if (!DATABASE_URL || !String(DATABASE_URL).trim()) {
 // 数据库连接池
 const pool = new Pool({ connectionString: DATABASE_URL });
 const app = express();
+
 // 自动解析 body 为 json
 app.use(express.json());
 
